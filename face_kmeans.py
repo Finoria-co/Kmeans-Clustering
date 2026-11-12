@@ -1,16 +1,18 @@
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib
 import os
 from glob import glob
+
+matplotlib.rcParams['font.family'] = 'Tahoma'
 
 #CONFIG
 IMAGE_FOLDER = "faces"
 K = 3
 N_RUNS = 5
-IMG_SIZE = 32  # resize รูปเป็น 32x32 ก่อน flatten
 
-#โหลดรูปและแปลงเป็น feature vector
-def load_and_flatten(path, size=IMG_SIZE):
+#วัด feature รูปร่างหน้า (กลม/ยาว) จาก bounding box ของหน้าในรูป
+def get_shape_features(path):
     img = plt.imread(path).astype(float)
     if img.max() > 1.0:
         img = img / 255.0
@@ -18,10 +20,33 @@ def load_and_flatten(path, size=IMG_SIZE):
         img = img[:, :, :3]
     if img.ndim == 3:
         img = 0.299 * img[:, :, 0] + 0.587 * img[:, :, 1] + 0.114 * img[:, :, 2]
+
     h, w = img.shape
-    row_idx = (np.arange(size) * h / size).astype(int)
-    col_idx = (np.arange(size) * w / size).astype(int)
-    return img[np.ix_(row_idx, col_idx)].flatten()
+
+    # ตรวจว่า background สว่างหรือมืด โดยเทียบกลางภาพกับขอบ
+    center_bright = np.mean(img[h//5 : 4*h//5, w//5 : 4*w//5])
+    edge_bright   = (np.mean(img[:h//5, :]) + np.mean(img[4*h//5:, :]) +
+                     np.mean(img[:, :w//5]) + np.mean(img[:, 4*w//5:])) / 4
+
+    if center_bright > edge_bright:
+        face_mask = img > np.percentile(img, 40)   # bg มืด → หน้าสว่างกว่า
+    else:
+        face_mask = img < np.percentile(img, 60)   # bg สว่าง → หน้ามืดกว่า
+
+    rows = np.where(face_mask.any(axis=1))[0]
+    cols = np.where(face_mask.any(axis=0))[0]
+
+    if len(rows) < 5 or len(cols) < 5:
+        face_h, face_w_px = float(h), float(w)
+    else:
+        face_h    = float(rows[-1] - rows[0] + 1)
+        face_w_px = float(cols[-1] - cols[0] + 1)
+
+    ratio  = face_w_px / face_h   # กลม ≈ 1.0, ยาว < 0.75
+    norm_w = face_w_px / w
+    norm_h = face_h / h
+
+    return [ratio, norm_w, norm_h]
 
 image_paths = glob(os.path.join(IMAGE_FOLDER, "*.jpg")) + \
               glob(os.path.join(IMAGE_FOLDER, "*.png")) + \
@@ -29,14 +54,16 @@ image_paths = glob(os.path.join(IMAGE_FOLDER, "*.jpg")) + \
 
 embeddings = []
 valid_paths = []
+ratios = []
 
 print("กำลังโหลดรูป...")
 for path in image_paths:
     try:
-        vec = load_and_flatten(path)
-        embeddings.append(vec)
+        feat = get_shape_features(path)
+        embeddings.append(feat)
         valid_paths.append(path)
-        print(f"  ✓ {os.path.basename(path)}")
+        ratios.append(feat[0])
+        print(f"  ✓ {os.path.basename(path)}  ratio={feat[0]:.3f}")
     except Exception as e:
         print(f"  ✗ {os.path.basename(path)}: {e}")
 
@@ -45,6 +72,7 @@ if len(embeddings) == 0:
     exit()
 
 X = np.array(embeddings)
+ratios = np.array(ratios)
 print(f"\nพบรูปทั้งหมด {len(X)} รูป → แบ่งเป็น {K} กลุ่ม\n")
 
 #K-Means (รันหลายรอบ เลือกผลดีที่สุด)
@@ -99,18 +127,17 @@ def get_representative(X, C, idx, group_id):
     dists = np.mean((X[members_i] - C[group_id])**2, axis=1)
     return members_i[np.argmin(dists)]
 
-#คำนวณ brightness เฉลี่ยของแต่ละกลุ่ม (0=มืด, 1=สว่าง)
-def group_brightness(X, idx, group_id):
-    return np.mean(X[idx == group_id])
+#จัด label ตามรูปร่างหน้า: ratio กว้าง/สูง สูง=กลม, ต่ำ=ยาว
+def group_avg_ratio(ratios, idx, group_id):
+    return float(np.mean(ratios[idx == group_id]))
 
-#สร้าง label อธิบายกลุ่ม
-brightness_per_group = [group_brightness(X, idx, g) for g in range(K)]
-brightness_rank = np.argsort(brightness_per_group)
+avg_ratio_per_group = [group_avg_ratio(ratios, idx, g) for g in range(K)]
+shape_labels = ['หน้ากลม', 'หน้ารูปไข่', 'หน้ายาว']
 auto_label = {}
-labels = ['Dark tone', 'Medium tone', 'Bright tone']
-for rank, g in enumerate(brightness_rank):
+for rank, g in enumerate(np.argsort(avg_ratio_per_group)[::-1]):  # สูง→ต่ำ
     count = int(np.sum(idx == g))
-    auto_label[g] = f"Group {g+1}: {labels[rank]} ({count} photos)"
+    avg_r = avg_ratio_per_group[g]
+    auto_label[g] = f"Group {g+1}: {shape_labels[rank]} (ratio={avg_r:.2f}, {count} คน)"
 
 #PCA scatter
 fig, ax = plt.subplots(figsize=(9, 6))
@@ -135,7 +162,7 @@ for group_id in range(K):
                    s=300, edgecolors='white', linewidths=2,
                    marker='*', zorder=4)
 
-ax.set_title("K-Means Clustering — PCA 2D View", color='white', fontsize=14, pad=12)
+ax.set_title("K-Means Clustering — Face Shape (กลม / รูปไข่ / ยาว)", color='white', fontsize=14, pad=12)
 ax.set_xlabel("Principal Component 1", color='#aaaaaa', fontsize=10)
 ax.set_ylabel("Principal Component 2", color='#aaaaaa', fontsize=10)
 ax.tick_params(colors='#aaaaaa')
@@ -145,7 +172,7 @@ for spine in ax.spines.values():
 legend = ax.legend(facecolor='#2a2a3e', edgecolor='#555577',
                    labelcolor='white', fontsize=9, loc='lower left')
 ax.text(0.98, 0.98,
-        "* = most representative photo\nclose dots = similar pixel pattern",
+        "* = ตัวแทนกลุ่ม\nratio = กว้าง÷สูง  สูง=กลม  ต่ำ=ยาว",
         transform=ax.transAxes, fontsize=8, color='#aaaaaa',
         va='top', ha='right',
         bbox=dict(facecolor='#1e1e2e', edgecolor='#555577', boxstyle='round,pad=0.4'))
@@ -154,11 +181,11 @@ plt.tight_layout()
 plt.savefig("pca_plot.png", dpi=120, facecolor=fig.get_facecolor())
 plt.show()
 
-print("\nผลลัพธ์การแบ่งกลุ่ม")
+print("\nผลลัพธ์การแบ่งกลุ่ม (รูปร่างหน้า)")
 for group_id in range(K):
-    member_paths = [valid_paths[i] for i in range(len(X)) if idx[i] == group_id]
     print(f"\n{auto_label[group_id]}:")
-    for p in member_paths:
-        print(f"  - {get_nickname(p)}")
+    for i in range(len(X)):
+        if idx[i] == group_id:
+            print(f"  - {get_nickname(valid_paths[i])}  (ratio={ratios[i]:.3f})")
 
 print("\nSaved: pca_plot.png")
