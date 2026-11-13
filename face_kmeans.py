@@ -21,18 +21,20 @@ def get_shape_features(path):
     if img.ndim == 3:
         img = 0.299 * img[:, :, 0] + 0.587 * img[:, :, 1] + 0.114 * img[:, :, 2]
 
-    h, w = img.shape
+    h, w = img.shape 
 
     # ตรวจว่า background สว่างหรือมืด โดยเทียบกลางภาพกับขอบ
     center_bright = np.mean(img[h//5 : 4*h//5, w//5 : 4*w//5])
     edge_bright   = (np.mean(img[:h//5, :]) + np.mean(img[4*h//5:, :]) +
                      np.mean(img[:, :w//5]) + np.mean(img[:, 4*w//5:])) / 4
+    #เทียบความสว่างตรงกลางกับขอบ เพื่อดูว่าพื้นหลังมืดหรือสว่าง
 
     if center_bright > edge_bright:
         face_mask = img > np.percentile(img, 40)   # bg มืด → หน้าสว่างกว่า
     else:
         face_mask = img < np.percentile(img, 60)   # bg สว่าง → หน้ามืดกว่า
-
+    #ใช้ percentile เป็นเกณฑ์ เพราะรูปแต่ละใบสว่างไม่เท่ากัน
+    
     rows = np.where(face_mask.any(axis=1))[0]
     cols = np.where(face_mask.any(axis=0))[0]
 
@@ -45,6 +47,7 @@ def get_shape_features(path):
     ratio  = face_w_px / face_h   # กลม ≈ 1.0, ยาว < 0.75
     norm_w = face_w_px / w
     norm_h = face_h / h
+    #ratio คืออัตราส่วนกว้างต่อสูงของหน้า ใช้บอกว่าหน้ากลมหรือยาว ส่วน norm_w กับ norm_h คือขนาดหน้าเทียบกับขนาดรูป ต้องหารด้วยขนาดรูปเพราะรูปแต่ละไฟล์ขนาดไม่เท่ากัน
 
     return [ratio, norm_w, norm_h]
 
@@ -57,6 +60,7 @@ valid_paths = []
 ratios = []
 
 print("กำลังโหลดรูป...")
+
 for path in image_paths:
     try:
         feat = get_shape_features(path)
@@ -75,7 +79,9 @@ X = np.array(embeddings)
 ratios = np.array(ratios)
 print(f"\nพบรูปทั้งหมด {len(X)} รูป → แบ่งเป็น {K} กลุ่ม\n")
 
+#สุ่มจุดศูนย์กลาง จัดกลุ่ม ย้ายศูนย์กลาง ทำซ้ำจนนิ่ง
 #K-Means (รันหลายรอบ เลือกผลดีที่สุด)
+#สร้างฟังก์ชันที่รับ 3 อย่าง: X (ตาราง feature), K (จำนวนกลุ่ม = 3), seed (เลขสุ่ม)
 def run_kmeans(X, K, seed):
     np.random.seed(seed)
     C = X[np.random.permutation(len(X))[:K]].copy()
@@ -108,7 +114,10 @@ idx = best_idx
 C = best_C
 print(f"\nเลือกผลที่ดีที่สุด (inertia = {best_inertia:.4f})")
 
+
+#โหลดรูปทุกไฟล์แล้วแปลงเป็นตาราง feature จากนั้นใช้ K-Means คือสุ่มจุดศูนย์กลาง 3 จุด จัดแต่ละรูปเข้ากลุ่มที่ใกล้ที่สุด แล้วย้ายจุดศูนย์กลางไปที่ค่าเฉลี่ย ทำซ้ำจนนิ่ง รันทั้งหมด 5 รอบแล้วเลือกรอบที่กลุ่มแน่นที่สุด
 #PCA 2D + Dashboard
+
 X_c = X - X.mean(axis=0)
 _, _, Vt = np.linalg.svd(X_c, full_matrices=False)
 X_2d = X_c @ Vt[:2].T
